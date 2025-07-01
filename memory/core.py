@@ -70,10 +70,13 @@ def _scan_and_process_folder(
         managed_hashes = set(db.get_all_file_hashes())
         new_files_processed = 0
 
-        # Gather all files recursively first
-        all_files = [f for f in source_folder.rglob('*') if f.is_file()]
-        total_files = len(all_files)
-        for idx, filepath in enumerate(all_files, 1):
+        file_counter = 0
+        for filepath in source_folder.rglob('*'):
+            if not filepath.is_file():
+                continue
+            file_counter += 1
+            print(f"Processing file {file_counter} ...", end='\r', flush=True)
+
             # Avoid processing the .memory folder itself or its contents
             if MEMORY_FOLDER_NAME in filepath.parts:
                 continue
@@ -150,9 +153,6 @@ def _scan_and_process_folder(
                 else:
                     msg = f"  Failed to add '{dest_path.name}' to database (should not happen if hash check passed)."
                     if logger: logger.info(msg)
-
-            # Show progress in terminal
-            print(f"Processing file {idx} of {total_files} ...", end='\r', flush=True)
 
         print(' ' * 60, end='\r')  # Clear the progress line
         if new_files_processed == 0:
@@ -381,5 +381,43 @@ def print_stats():
         print("-------------------\n")
     except Exception as e:
         print(f"Error gathering stats: {e}")
+    finally:
+        db.close()
+
+def delete_file_by_id(record_id):
+    """
+    Deletes a single file from the database and disk by its record id (file_hash).
+    """
+    home_folder = _get_home_folder_path()
+    memory_path = _get_memory_path()
+    db_path = _get_db_path()
+
+    if not memory_path.exists():
+        print(f"Error: Memory not initialized in '{home_folder}'. Run 'memory init' first.")
+        return
+
+    db = MemoryDB(db_path)
+    db.connect()
+    try:
+        cursor = db.conn.cursor()
+        cursor.execute("SELECT current_path FROM files WHERE file_hash = ?", (record_id,))
+        row = cursor.fetchone()
+        if not row:
+            print(f"No file found with record id (file_hash): {record_id}")
+            return
+        file_path = Path(row[0])
+        try:
+            if file_path.exists():
+                file_path.unlink()
+                print(f"Deleted file: {file_path}")
+            else:
+                print(f"File not found on disk (already deleted?): {file_path}")
+        except Exception as e:
+            print(f"Error deleting file {file_path}: {e}")
+        cursor.execute("DELETE FROM files WHERE file_hash = ?", (record_id,))
+        db.conn.commit()
+        print(f"Deleted database record for file_hash: {record_id}")
+    except Exception as e:
+        print(f"Error deleting file by id: {e}")
     finally:
         db.close()

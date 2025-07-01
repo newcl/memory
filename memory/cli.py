@@ -42,11 +42,19 @@ def upload(dryrun, cloud_target):
         click.echo("Usage: memory upload [--dryrun] <cloud_target>")
 
 @cli.command()
-def delete():
+def destroy():
     """
     Deletes the .memory folder and its contents, undoing 'memory init'.
     """
     core.delete_memory()
+
+@cli.command()
+@click.argument('record_id')
+def delete(record_id):
+    """
+    Deletes a single file from the database and disk by its record id (file_hash).
+    """
+    core.delete_file_by_id(record_id)
 
 @cli.command()
 def stats():
