@@ -250,3 +250,18 @@ def upload_to_cloud(cloud_target: str):
         print(f"An error occurred during upload: {e}")
     finally:
         db.close()
+
+def delete_memory():
+    """
+    Deletes the .memory folder and its contents, undoing 'memory init'.
+    """
+    memory_path = _get_memory_path()
+    if not memory_path.exists():
+        print(f"No '{MEMORY_FOLDER_NAME}' folder found in '{_get_home_folder_path()}'. Nothing to delete.")
+        return
+    try:
+        import shutil
+        shutil.rmtree(memory_path)
+        print(f"Deleted '{memory_path}'. Memory has been reset.")
+    except Exception as e:
+        print(f"Error deleting '{memory_path}': {e}")

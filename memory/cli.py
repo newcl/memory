@@ -41,5 +41,12 @@ def upload(dryrun, cloud_target):
         click.echo("Error: Please specify a cloud target (s3, gcloud, azure) or use --dryrun.")
         click.echo("Usage: memory upload [--dryrun] <cloud_target>")
 
+@cli.command()
+def delete():
+    """
+    Deletes the .memory folder and its contents, undoing 'memory init'.
+    """
+    core.delete_memory()
+
 if __name__ == '__main__':
     cli()
