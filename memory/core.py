@@ -181,8 +181,10 @@ def import_folder(source_folder_str: str, recursive: bool = True):
     db_path = _get_db_path()
 
     if not memory_path.exists():
-        print(f"Error: Memory not initialized in '{home_folder}'. Run 'memory init' first.")
-        return
+        print(f"Memory not initialized in '{home_folder}'. Running 'init'...")
+        if not init_memory():
+            print("Failed to initialize memory. Aborting import.")
+            return
 
     source_folder = Path(source_folder_str).resolve() # Resolve to absolute path
     if not source_folder.is_dir():
