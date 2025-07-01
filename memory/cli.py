@@ -48,5 +48,12 @@ def delete():
     """
     core.delete_memory()
 
+@cli.command()
+def stats():
+    """
+    Show statistics: total files, total size, metadata extraction rate, upload status.
+    """
+    core.print_stats()
+
 if __name__ == '__main__':
     cli()

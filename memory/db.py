@@ -37,7 +37,8 @@ class MemoryDB:
                 extracted_metadata TEXT, -- Store JSON string of EXIF/video metadata
                 uploaded_s3 BOOLEAN DEFAULT FALSE,
                 uploaded_gcloud BOOLEAN DEFAULT FALSE,
-                uploaded_azure BOOLEAN DEFAULT FALSE
+                uploaded_azure BOOLEAN DEFAULT FALSE,
+                metadata_extracted BOOLEAN DEFAULT FALSE
             )
         ''')
         self.conn.commit()
@@ -48,8 +49,8 @@ class MemoryDB:
         try:
             cursor.execute('''
                 INSERT INTO files (file_hash, original_filename, current_filename, original_path,
-                                   current_path, size, media_type, date_added, extracted_metadata)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                   current_path, size, media_type, date_added, extracted_metadata, metadata_extracted)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
                 metadata['file_hash'],
                 metadata['original_filename'],
@@ -59,7 +60,8 @@ class MemoryDB:
                 metadata['size'],
                 metadata['media_type'],
                 metadata['date_added'],
-                metadata.get('extracted_metadata', None)
+                metadata.get('extracted_metadata', None),
+                metadata.get('metadata_extracted', False)
             ))
             self.conn.commit()
             return True

@@ -8,4 +8,5 @@ venv/
 
 # Memory-specific
 .memory/
+mymemory/
 *.db
