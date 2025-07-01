@@ -57,7 +57,8 @@ def _scan_and_process_folder(
     source_folder: Path,
     db_path: Path,
     is_init: bool = False,
-    logger=None
+    logger=None,
+    recursive: bool = True
 ):
     """
     Scans a folder for media files, processes them (hash, copy, metadata),
@@ -71,7 +72,11 @@ def _scan_and_process_folder(
         new_files_processed = 0
 
         file_counter = 0
-        for filepath in source_folder.rglob('*'):
+        if recursive:
+            file_iter = source_folder.rglob('*')
+        else:
+            file_iter = source_folder.iterdir()
+        for filepath in file_iter:
             if not filepath.is_file():
                 continue
             file_counter += 1
@@ -169,7 +174,7 @@ def _scan_and_process_folder(
         db.close()
 
 
-def import_folder(source_folder_str: str):
+def import_folder(source_folder_str: str, recursive: bool = True):
     """Imports media files from a source folder into the memory home folder."""
     home_folder = _get_home_folder_path()
     memory_path = _get_memory_path()
@@ -193,9 +198,9 @@ def import_folder(source_folder_str: str):
     logging.basicConfig(filename=log_file, filemode='w', level=logging.INFO, format='%(asctime)s %(message)s')
     logger = logging.getLogger('memory_import')
 
-    print(f"Importing from '{source_folder}' into '{home_folder}'...")
-    logger.info(f"Importing from '{source_folder}' into '{home_folder}'...")
-    _scan_and_process_folder(source_folder, db_path, logger=logger)
+    print(f"Importing from '{source_folder}' into '{home_folder}'... (recursive={recursive})")
+    logger.info(f"Importing from '{source_folder}' into '{home_folder}'... (recursive={recursive})")
+    _scan_and_process_folder(source_folder, db_path, logger=logger, recursive=recursive)
     print("Import complete.")
     logger.info("Import complete.")
 

@@ -16,12 +16,13 @@ def init():
 
 @cli.command('import') # Use 'import' as the command name, but func remains import_cmd
 @click.argument('source_folder', type=click.Path(exists=True, file_okay=False, dir_okay=True, readable=True))
-def import_cmd(source_folder):
+@click.option('--recursive/--no-recursive', default=True, show_default=True, help='Recursively import files from subfolders (default: true)')
+def import_cmd(source_folder, recursive):
     """
     Imports media files from SOURCE_FOLDER into the Memory home folder.
     Only new files are copied and added to the database.
     """
-    core.import_folder(source_folder)
+    core.import_folder(source_folder, recursive=recursive)
 
 @cli.command()
 @click.option('--dryrun', is_flag=True, help="List files that would be uploaded without performing the upload.")
