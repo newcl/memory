@@ -253,12 +253,34 @@ def upload_to_cloud(cloud_target: str):
 
 def delete_memory():
     """
-    Deletes the .memory folder and its contents, undoing 'memory init'.
+    Deletes all files tracked in the database, then deletes the .memory folder and its contents, undoing 'memory init'.
     """
     memory_path = _get_memory_path()
+    db_path = _get_db_path()
     if not memory_path.exists():
         print(f"No '{MEMORY_FOLDER_NAME}' folder found in '{_get_home_folder_path()}'. Nothing to delete.")
         return
+    # Delete all files tracked in the database
+    try:
+        db = MemoryDB(db_path)
+        db.connect()
+        cursor = db.conn.cursor()
+        cursor.execute("SELECT current_path FROM files")
+        files = cursor.fetchall()
+        for row in files:
+            file_path = Path(row[0])
+            try:
+                if file_path.exists():
+                    file_path.unlink()
+                    print(f"Deleted file: {file_path}")
+                else:
+                    print(f"File not found (already deleted?): {file_path}")
+            except Exception as e:
+                print(f"Error deleting file {file_path}: {e}")
+        db.close()
+    except Exception as e:
+        print(f"Error deleting files from database: {e}")
+    # Now remove the .memory folder
     try:
         import shutil
         shutil.rmtree(memory_path)
