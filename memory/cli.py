@@ -68,14 +68,35 @@ def stats():
 @click.option('--samesize', is_flag=True, help='List groups of files with the same file size (more than one per group).')
 @click.option('--videos', is_flag=True, help='Restrict detection to known video formats.')
 @click.option('--photos', is_flag=True, help='Restrict detection to known photo formats.')
-def detect(samesize, videos, photos):
+@click.option('--visual', is_flag=True, help='Detect visually similar files (photos/videos) using perceptual hashing.')
+@click.option('--populate-hash', is_flag=True, help='Populate missing perceptual hashes for all files in the database.')
+def detect(samesize, videos, photos, visual, populate_hash):
     """
     Detect potential duplicates or issues in the managed files.
     """
-    if samesize:
+    if populate_hash:
+        core.populate_perceptual_hashes()
+    elif visual:
+        core.detect_visual(videos=videos, photos=photos)
+    elif samesize:
         core.detect_samesize(videos=videos, photos=photos)
     else:
-        print('No detection mode specified. Use --samesize for same-size grouping.')
+        print('No detection mode specified. Use --samesize, --visual, or --populate-hash.')
+
+@cli.command()
+def migrate():
+    """
+    Check for and add any missing columns to the files table in the database.
+    """
+    core.migrate_files_table()
+
+@cli.command()
+@click.argument('folder', type=click.Path(exists=True, file_okay=False, dir_okay=True, readable=True))
+def scan(folder):
+    """
+    Scan the specified folder for files not under management and print stats by total number, total size, and by extension.
+    """
+    core.scan_unmanaged_files(folder)
 
 if __name__ == '__main__':
     cli()

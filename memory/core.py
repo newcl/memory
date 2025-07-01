@@ -7,6 +7,9 @@ from typing import Optional, List, Dict, Any
 import sys
 import logging
 import urllib.parse
+from PIL import Image
+import imagehash
+import cv2
 
 from memory.db import MemoryDB, DB_NAME
 from memory.hasher import calculate_file_hash
@@ -138,6 +141,7 @@ def _scan_and_process_folder(
                 except Exception:
                     metadata_extracted = False
 
+                perceptual_hash = _get_perceptual_hash(filepath, media_type)
                 metadata = {
                     'file_hash': file_hash,
                     'original_filename': filepath.name,
@@ -148,7 +152,8 @@ def _scan_and_process_folder(
                     'media_type': media_type,
                     'date_added': datetime.now().isoformat(),
                     'extracted_metadata': extracted_metadata_json,
-                    'metadata_extracted': metadata_extracted
+                    'metadata_extracted': metadata_extracted,
+                    'perceptual_hash': perceptual_hash
                 }
 
                 if db.add_file_metadata(metadata):
@@ -174,6 +179,24 @@ def _scan_and_process_folder(
     finally:
         db.close()
 
+def _get_perceptual_hash(filepath: Path, media_type: str) -> str | None:
+    try:
+        if media_type == 'photo':
+            with Image.open(filepath) as img:
+                return str(imagehash.phash(img))
+        elif media_type == 'video':
+            cap = cv2.VideoCapture(str(filepath))
+            frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            if frame_count == 0:
+                return None
+            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_count // 2)
+            ret, frame = cap.read()
+            if ret:
+                img = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+                return str(imagehash.phash(img))
+    except Exception as e:
+        pass
+    return None
 
 def import_folder(source_folder_str: str, recursive: bool = True):
     """Imports media files from a source folder into the memory home folder."""
@@ -472,3 +495,236 @@ def detect_samesize(videos=False, photos=False):
         print(f"Error during same-size detection: {e}")
     finally:
         db.close()
+
+def detect_visual(videos=False, photos=False, threshold=5):
+    """
+    Detect visually similar files using perceptual hashes. Restrict to videos/photos if specified.
+    """
+    home_folder = _get_home_folder_path()
+    memory_path = _get_memory_path()
+    db_path = _get_db_path()
+
+    if not memory_path.exists():
+        print(f"Error: Memory not initialized in '{home_folder}'. Run 'memory init' first.")
+        return
+
+    db = MemoryDB(db_path)
+    db.connect()
+    try:
+        cursor = db.conn.cursor()
+        query = "SELECT file_hash, current_filename, current_path, media_type, perceptual_hash FROM files WHERE perceptual_hash IS NOT NULL"
+        cursor.execute(query)
+        files = []
+        for file_hash, filename, path, media_type, phash in cursor.fetchall():
+            if videos and media_type != 'video':
+                continue
+            if photos and media_type != 'photo':
+                continue
+            files.append((file_hash, filename, path, media_type, phash))
+        # Group by similarity
+        from collections import defaultdict
+        visited = set()
+        groups = []
+        for i, (fh1, fn1, p1, mt1, ph1) in enumerate(files):
+            if fh1 in visited:
+                continue
+            group = [(fn1, p1)]
+            visited.add(fh1)
+            hash1 = imagehash.hex_to_hash(ph1)
+            for j, (fh2, fn2, p2, mt2, ph2) in enumerate(files):
+                if i == j or fh2 in visited:
+                    continue
+                hash2 = imagehash.hex_to_hash(ph2)
+                if hash1 - hash2 <= threshold:
+                    group.append((fn2, p2))
+                    visited.add(fh2)
+            if len(group) > 1:
+                groups.append(group)
+        if not groups:
+            print("No visually similar files found.")
+        else:
+            for group in groups:
+                print(f"\nVisually similar files:")
+                for filename, path in group:
+                    abs_path = str(Path(path).resolve())
+                    file_url = 'file://' + urllib.parse.quote(abs_path)
+                    print(f"  {filename}  ({file_url})")
+    except Exception as e:
+        print(f"Error during visual similarity detection: {e}")
+    finally:
+        db.close()
+
+def populate_perceptual_hashes():
+    """
+    Populate missing perceptual hashes for all files in the database, with progress and logging.
+    """
+    import logging
+    home_folder = _get_home_folder_path()
+    memory_path = _get_memory_path()
+    db_path = _get_db_path()
+
+    if not memory_path.exists():
+        print(f"Error: Memory not initialized in '{home_folder}'. Run 'memory init' first.")
+        return
+
+    log_file = _get_home_folder_path() / 'memory_populate_hash.log'
+    logging.basicConfig(filename=log_file, filemode='w', level=logging.INFO, format='%(asctime)s %(message)s')
+    logger = logging.getLogger('memory_populate_hash')
+
+    db = MemoryDB(db_path)
+    db.connect()
+    try:
+        cursor = db.conn.cursor()
+        cursor.execute("SELECT file_hash, current_path, media_type FROM files WHERE perceptual_hash IS NULL OR perceptual_hash = ''")
+        rows = cursor.fetchall()
+        total = len(rows)
+        if not rows:
+            print("All files already have perceptual hashes.")
+            logger.info("All files already have perceptual hashes.")
+            return
+        updated = 0
+        for idx, (file_hash, path, media_type) in enumerate(rows, 1):
+            print(f"Processing file {idx} of {total} ...", end='\r', flush=True)
+            file_path = Path(path)
+            if not file_path.exists():
+                logger.warning(f"File not found: {file_path}, skipping.")
+                continue
+            phash = _get_perceptual_hash(file_path, media_type)
+            if phash:
+                cursor.execute("UPDATE files SET perceptual_hash = ? WHERE file_hash = ?", (phash, file_hash))
+                updated += 1
+                logger.info(f"Populated perceptual hash for: {file_path}")
+            else:
+                logger.warning(f"Could not compute perceptual hash for: {file_path}")
+        db.conn.commit()
+        print(' ' * 60, end='\r')  # Clear the progress line
+        print(f"Populated perceptual hashes for {updated} files.")
+        logger.info(f"Populated perceptual hashes for {updated} files.")
+    except Exception as e:
+        print(f"Error during perceptual hash population: {e}")
+        logger.error(f"Error during perceptual hash population: {e}")
+    finally:
+        db.close()
+
+def migrate_files_table():
+    """
+    Check for and add any missing columns to the files table in the database.
+    """
+    home_folder = _get_home_folder_path()
+    memory_path = _get_memory_path()
+    db_path = _get_db_path()
+
+    if not memory_path.exists():
+        print(f"Error: Memory not initialized in '{home_folder}'. Run 'memory init' first.")
+        return
+
+    expected_columns = {
+        'file_hash': 'TEXT',
+        'original_filename': 'TEXT',
+        'current_filename': 'TEXT',
+        'original_path': 'TEXT',
+        'current_path': 'TEXT',
+        'size': 'INTEGER',
+        'media_type': 'TEXT',
+        'date_added': 'TEXT',
+        'extracted_metadata': 'TEXT',
+        'uploaded_s3': 'BOOLEAN DEFAULT FALSE',
+        'uploaded_gcloud': 'BOOLEAN DEFAULT FALSE',
+        'uploaded_azure': 'BOOLEAN DEFAULT FALSE',
+        'metadata_extracted': 'BOOLEAN DEFAULT FALSE',
+        'perceptual_hash': 'TEXT'
+    }
+    import sqlite3
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    cursor.execute("PRAGMA table_info(files);")
+    existing_columns = {row[1] for row in cursor.fetchall()}
+    added = 0
+    for col, coltype in expected_columns.items():
+        if col not in existing_columns:
+            print(f"Adding missing column: {col}")
+            cursor.execute(f"ALTER TABLE files ADD COLUMN {col} {coltype};")
+            added += 1
+    conn.commit()
+    conn.close()
+    if added == 0:
+        print("No columns needed to be added. Schema is up to date.")
+    else:
+        print(f"Migration complete. {added} columns added.")
+
+def scan_unmanaged_files(folder):
+    """
+    Scan the specified folder for files not under management and print stats by total number, total size, and by extension (case-insensitive).
+    """
+    folder = Path(folder).resolve()
+    home_folder = _get_home_folder_path()
+    memory_path = _get_memory_path()
+    db_path = _get_db_path()
+
+    if not folder.is_dir():
+        print(f"Error: {folder} is not a directory.")
+        return
+
+    managed_hashes = set()
+    if memory_path.exists():
+        db = MemoryDB(db_path)
+        db.connect()
+        try:
+            managed_hashes = set(db.get_all_file_hashes())
+        except Exception as e:
+            print(f"Error reading managed hashes: {e}")
+        finally:
+            db.close()
+
+    total_files = 0
+    total_size = 0
+    from collections import defaultdict
+    ext_counts = defaultdict(int)
+    ext_sizes = defaultdict(int)
+
+    import hashlib
+    def get_sha256(path):
+        h = hashlib.sha256()
+        with open(path, 'rb') as f:
+            while True:
+                chunk = f.read(65536)
+                if not chunk:
+                    break
+                h.update(chunk)
+        return h.hexdigest()
+
+    for file_path in folder.rglob('*'):
+        if not file_path.is_file():
+            continue
+        try:
+            file_hash = get_sha256(file_path)
+        except Exception as e:
+            print(f"Error hashing {file_path}: {e}")
+            continue
+        if file_hash in managed_hashes:
+            continue
+        total_files += 1
+        size = file_path.stat().st_size
+        total_size += size
+        ext = file_path.suffix.lower().lstrip('.')
+        ext_counts[ext] += 1
+        ext_sizes[ext] += size
+
+    def human_readable_size(size_bytes):
+        for unit in ['B','KB','MB','GB','TB','PB']:
+            if size_bytes < 1024:
+                return f"{size_bytes:.2f} {unit}"
+            size_bytes /= 1024
+        return f"{size_bytes:.2f} PB"
+
+    print(f"\nUnmanaged files in {folder}:")
+    print(f"Total files: {total_files}")
+    print(f"Total size: {total_size} bytes ({human_readable_size(total_size)})")
+    print(f"{'Extension':<10} {'Count':>8} {'%Files':>8} {'Size':>14} {'%Size':>8}")
+    for ext in sorted(ext_counts, key=lambda x: (-ext_counts[x], x)):
+        count = ext_counts[ext]
+        size = ext_sizes[ext]
+        pct_files = count / total_files * 100 if total_files > 0 else 0
+        pct_size = size / total_size * 100 if total_size > 0 else 0
+        print(f"{ext or '(none)':<10} {count:8d} {pct_files:8.1f} {human_readable_size(size):>14} {pct_size:8.1f}")
+    print()

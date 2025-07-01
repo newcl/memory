@@ -38,7 +38,8 @@ class MemoryDB:
                 uploaded_s3 BOOLEAN DEFAULT FALSE,
                 uploaded_gcloud BOOLEAN DEFAULT FALSE,
                 uploaded_azure BOOLEAN DEFAULT FALSE,
-                metadata_extracted BOOLEAN DEFAULT FALSE
+                metadata_extracted BOOLEAN DEFAULT FALSE,
+                perceptual_hash TEXT
             )
         ''')
         self.conn.commit()
