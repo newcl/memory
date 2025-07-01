@@ -76,6 +76,7 @@ def _scan_and_process_folder(
         new_files_processed = 0
 
         file_counter = 0
+        memory_path = _get_memory_path()
         if recursive:
             file_iter = source_folder.rglob('*')
         else:
@@ -99,7 +100,8 @@ def _scan_and_process_folder(
                     if logger: logger.info(msg)
                     continue
 
-                dest_folder = _get_home_folder_path()
+                # Always copy into .memory folder
+                dest_folder = memory_path
                 current_filename = filepath.name
                 dest_path = dest_folder / current_filename
 
@@ -109,7 +111,7 @@ def _scan_and_process_folder(
                     if existing_file_hash == file_hash:
                         msg = f"  Skipping '{filepath.name}': Already present as '{dest_path.name}'."
                         if logger: logger.info(msg)
-                        continue # File already exists in home folder with same content
+                        continue # File already exists in .memory folder with same content
 
                     # Filename conflict with different content
                     suffix = generate_timestamp_suffix()
@@ -118,18 +120,9 @@ def _scan_and_process_folder(
                     msg = f"  Filename conflict for '{filepath.name}'. Copying as '{new_name}'."
                     if logger: logger.info(msg)
 
-                if is_init:
-                    if filepath != dest_path:
-                        msg = f"  Indexing and potentially renaming '{filepath.name}' to '{dest_path.name}'..."
-                        if logger: logger.info(msg)
-                        shutil.copy2(filepath, dest_path)
-                    else:
-                        msg = f"  Indexing '{filepath.name}'..."
-                        if logger: logger.info(msg)
-                else:
-                    msg = f"  Copying '{filepath.name}' to '{dest_path.name}'..."
-                    if logger: logger.info(msg)
-                    shutil.copy2(filepath, dest_path)
+                msg = f"  Copying '{filepath.name}' to '{dest_path.name}'..."
+                if logger: logger.info(msg)
+                shutil.copy2(filepath, dest_path)
 
                 # Extract media metadata
                 extracted_metadata_json = get_media_metadata(filepath, media_type)
@@ -146,8 +139,8 @@ def _scan_and_process_folder(
                     'file_hash': file_hash,
                     'original_filename': filepath.name,
                     'current_filename': dest_path.name,
-                    'original_path': str(filepath),
-                    'current_path': str(dest_path),
+                    'original_path': _to_relative_path(filepath, memory_path),
+                    'current_path': _to_relative_path(dest_path, memory_path),
                     'size': filepath.stat().st_size,
                     'media_type': media_type,
                     'date_added': datetime.now().isoformat(),
@@ -282,7 +275,7 @@ def upload_to_cloud(cloud_target: str):
 
         print(f"\n--- Uploading {len(unuploaded_files)} files to {cloud_target.upper()} ---")
         for i, file_meta in enumerate(unuploaded_files):
-            file_path = Path(file_meta['current_path'])
+            file_path = _from_relative_path(file_meta['current_path'], memory_path)
             if not file_path.exists():
                 print(f"Warning: File '{file_meta['current_filename']}' not found at '{file_path}'. Skipping.")
                 continue
@@ -328,7 +321,7 @@ def delete_memory():
         cursor.execute("SELECT current_path FROM files")
         files = cursor.fetchall()
         for row in files:
-            file_path = Path(row[0])
+            file_path = _from_relative_path(row[0], memory_path)
             try:
                 if file_path.exists():
                     file_path.unlink()
@@ -436,7 +429,7 @@ def delete_file_by_id(record_id):
         if not row:
             print(f"No file found with record id (file_hash): {record_id}")
             return
-        file_path = Path(row[0])
+        file_path = _from_relative_path(row[0], memory_path)
         try:
             if file_path.exists():
                 file_path.unlink()
@@ -486,7 +479,7 @@ def detect_samesize(videos=False, photos=False):
                 found = True
                 print(f"\nSize: {size} bytes - {len(files)} files:")
                 for filename, path in files:
-                    abs_path = str(Path(path).resolve())
+                    abs_path = str(_from_relative_path(path, memory_path).resolve())
                     file_url = 'file://' + urllib.parse.quote(abs_path)
                     print(f"  {filename}  ({file_url})")
         if not found:
@@ -546,7 +539,7 @@ def detect_visual(videos=False, photos=False, threshold=5):
             for group in groups:
                 print(f"\nVisually similar files:")
                 for filename, path in group:
-                    abs_path = str(Path(path).resolve())
+                    abs_path = str(_from_relative_path(path, memory_path).resolve())
                     file_url = 'file://' + urllib.parse.quote(abs_path)
                     print(f"  {filename}  ({file_url})")
     except Exception as e:
@@ -585,7 +578,7 @@ def populate_perceptual_hashes():
         updated = 0
         for idx, (file_hash, path, media_type) in enumerate(rows, 1):
             print(f"Processing file {idx} of {total} ...", end='\r', flush=True)
-            file_path = Path(path)
+            file_path = _from_relative_path(path, memory_path)
             if not file_path.exists():
                 logger.warning(f"File not found: {file_path}, skipping.")
                 continue
@@ -603,6 +596,55 @@ def populate_perceptual_hashes():
     except Exception as e:
         print(f"Error during perceptual hash population: {e}")
         logger.error(f"Error during perceptual hash population: {e}")
+    finally:
+        db.close()
+
+def migrate_files_to_memory():
+    """
+    Move all files referenced by current_path in the database into the .memory folder (if not already there), update current_path to the new relative path, and warn about any missing or conflicting files.
+    """
+    import shutil
+    home_folder = _get_home_folder_path()
+    memory_path = _get_memory_path()
+    db_path = _get_db_path()
+
+    if not memory_path.exists():
+        print(f"Error: Memory not initialized in '{home_folder}'. Run 'memory init' first.")
+        return
+
+    db = MemoryDB(db_path)
+    db.connect()
+    try:
+        cursor = db.conn.cursor()
+        cursor.execute("SELECT file_hash, current_path FROM files")
+        rows = cursor.fetchall()
+        moved = 0
+        for file_hash, current_path in rows:
+            abs_path = _from_relative_path(current_path, memory_path)
+            if abs_path.parent == memory_path:
+                continue  # Already in .memory
+            if not abs_path.exists():
+                print(f"File not found: {abs_path}, skipping.")
+                continue
+            dest_path = memory_path / abs_path.name
+            # Handle name conflicts
+            if dest_path.exists():
+                # If same file, skip; else, add suffix
+                if calculate_file_hash(dest_path) == calculate_file_hash(abs_path):
+                    print(f"File already exists in .memory: {dest_path}, skipping.")
+                    continue
+                else:
+                    suffix = generate_timestamp_suffix()
+                    dest_path = memory_path / f"{abs_path.stem}_{suffix}{abs_path.suffix}"
+                    print(f"Filename conflict, moving as: {dest_path}")
+            shutil.move(str(abs_path), str(dest_path))
+            rel_path = _to_relative_path(dest_path, memory_path)
+            cursor.execute("UPDATE files SET current_path = ? WHERE file_hash = ?", (rel_path, file_hash))
+            moved += 1
+        db.conn.commit()
+        print(f"Moved {moved} files into .memory folder.")
+    except Exception as e:
+        print(f"Error during file migration: {e}")
     finally:
         db.close()
 
@@ -651,6 +693,41 @@ def migrate_files_table():
         print("No columns needed to be added. Schema is up to date.")
     else:
         print(f"Migration complete. {added} columns added.")
+    # After column migration, migrate paths to relative
+    migrate_paths_to_relative()
+    migrate_files_to_memory()
+
+def migrate_paths_to_relative():
+    """
+    Migrate all absolute paths in the database to relative paths (relative to the .memory folder) for current_path and original_path.
+    """
+    home_folder = _get_home_folder_path()
+    memory_path = _get_memory_path()
+    db_path = _get_db_path()
+
+    if not memory_path.exists():
+        print(f"Error: Memory not initialized in '{home_folder}'. Run 'memory init' first.")
+        return
+
+    db = MemoryDB(db_path)
+    db.connect()
+    try:
+        cursor = db.conn.cursor()
+        cursor.execute("SELECT file_hash, current_path, original_path FROM files")
+        rows = cursor.fetchall()
+        updated = 0
+        for file_hash, current_path, original_path in rows:
+            rel_current = _to_relative_path(_from_relative_path(current_path, memory_path), memory_path)
+            rel_original = _to_relative_path(_from_relative_path(original_path, memory_path), memory_path)
+            if rel_current != current_path or rel_original != original_path:
+                cursor.execute("UPDATE files SET current_path = ?, original_path = ? WHERE file_hash = ?", (rel_current, rel_original, file_hash))
+                updated += 1
+        db.conn.commit()
+        print(f"Migrated {updated} records to relative paths.")
+    except Exception as e:
+        print(f"Error during path migration: {e}")
+    finally:
+        db.close()
 
 def scan_unmanaged_files(folder):
     """
@@ -728,3 +805,12 @@ def scan_unmanaged_files(folder):
         pct_size = size / total_size * 100 if total_size > 0 else 0
         print(f"{ext or '(none)':<10} {count:8d} {pct_files:8.1f} {human_readable_size(size):>14} {pct_size:8.1f}")
     print()
+
+def _to_relative_path(path: Path, base: Path) -> str:
+    try:
+        return str(path.relative_to(base))
+    except Exception:
+        return str(path)
+
+def _from_relative_path(rel_path: str, base: Path) -> Path:
+    return base / rel_path
