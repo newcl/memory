@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Optional, List, Dict, Any
 import sys
 import logging
+import urllib.parse
 
 from memory.db import MemoryDB, DB_NAME
 from memory.hasher import calculate_file_hash
@@ -426,5 +427,48 @@ def delete_file_by_id(record_id):
         print(f"Deleted database record for file_hash: {record_id}")
     except Exception as e:
         print(f"Error deleting file by id: {e}")
+    finally:
+        db.close()
+
+def detect_samesize(videos=False, photos=False):
+    """
+    List groups of files with the same file size (more than one per group).
+    Restrict to videos or photos if specified.
+    """
+    home_folder = _get_home_folder_path()
+    memory_path = _get_memory_path()
+    db_path = _get_db_path()
+
+    if not memory_path.exists():
+        print(f"Error: Memory not initialized in '{home_folder}'. Run 'memory init' first.")
+        return
+
+    db = MemoryDB(db_path)
+    db.connect()
+    try:
+        cursor = db.conn.cursor()
+        query = "SELECT size, current_filename, current_path, media_type FROM files"
+        cursor.execute(query)
+        from collections import defaultdict
+        size_groups = defaultdict(list)
+        for size, filename, path, media_type in cursor.fetchall():
+            if videos and media_type != 'video':
+                continue
+            if photos and media_type != 'photo':
+                continue
+            size_groups[size].append((filename, path))
+        found = False
+        for size, files in size_groups.items():
+            if len(files) > 1:
+                found = True
+                print(f"\nSize: {size} bytes - {len(files)} files:")
+                for filename, path in files:
+                    abs_path = str(Path(path).resolve())
+                    file_url = 'file://' + urllib.parse.quote(abs_path)
+                    print(f"  {filename}  ({file_url})")
+        if not found:
+            print("No groups of files with the same size found.")
+    except Exception as e:
+        print(f"Error during same-size detection: {e}")
     finally:
         db.close()

@@ -64,5 +64,18 @@ def stats():
     """
     core.print_stats()
 
+@cli.command()
+@click.option('--samesize', is_flag=True, help='List groups of files with the same file size (more than one per group).')
+@click.option('--videos', is_flag=True, help='Restrict detection to known video formats.')
+@click.option('--photos', is_flag=True, help='Restrict detection to known photo formats.')
+def detect(samesize, videos, photos):
+    """
+    Detect potential duplicates or issues in the managed files.
+    """
+    if samesize:
+        core.detect_samesize(videos=videos, photos=photos)
+    else:
+        print('No detection mode specified. Use --samesize for same-size grouping.')
+
 if __name__ == '__main__':
     cli()
