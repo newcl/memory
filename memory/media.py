@@ -56,20 +56,21 @@ def extract_image_metadata(filepath: Path) -> Dict[str, Any]:
         print(f"Warning: Could not extract image metadata from {filepath}: {e}")
     return metadata
 
-def extract_video_metadata(filepath: Path) -> Dict[str, Any]:
+def extract_video_metadata(filepath: Path, logger=None) -> Dict[str, Any]:
     """
     Placeholder for video metadata extraction using pure Python.
     """
-    print(f"Note: Basic video metadata extraction for {filepath} is a placeholder.")
+    if logger:
+        logger.info(f"Note: Basic video metadata extraction for {filepath} is a placeholder.")
     return {}
 
-def get_media_metadata(filepath: Path, media_type: str) -> str:
+def get_media_metadata(filepath: Path, media_type: str, logger=None) -> str:
     """Extracts metadata based on media type and returns it as a JSON string."""
     metadata = {}
     if media_type == "photo":
         metadata = extract_image_metadata(filepath)
     elif media_type == "video":
-        metadata = extract_video_metadata(filepath)
+        metadata = extract_video_metadata(filepath, logger)
     
     # The default=str fallback is a safety net for any types _json_serializable_value misses.
     # ensure_ascii=False allows non-ASCII characters directly in the JSON string for better readability.

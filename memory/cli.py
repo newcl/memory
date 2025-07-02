@@ -17,12 +17,13 @@ def init():
 @cli.command('import') # Use 'import' as the command name, but func remains import_cmd
 @click.argument('source_folder', type=click.Path(exists=True, file_okay=False, dir_okay=True, readable=True))
 @click.option('--recursive/--no-recursive', default=True, show_default=True, help='Recursively import files from subfolders (default: true)')
-def import_cmd(source_folder, recursive):
+@click.option('--threads', default=2, show_default=True, type=int, help='Number of threads to use for import (default: 2)')
+def import_cmd(source_folder, recursive, threads):
     """
     Imports media files from SOURCE_FOLDER into the Memory home folder.
     Only new files are copied and added to the database.
     """
-    core.import_folder(source_folder, recursive=recursive)
+    core.import_folder(source_folder, recursive=recursive, threads=threads)
 
 @cli.command()
 @click.option('--dryrun', is_flag=True, help="List files that would be uploaded without performing the upload.")
@@ -58,11 +59,12 @@ def delete(record_id):
     core.delete_file_by_id(record_id)
 
 @cli.command()
-def stats():
+@click.option('--no-metadata', is_flag=True, help='Show stats for all files regardless of metadata extraction status.')
+def stats(no_metadata):
     """
     Show statistics: total files, total size, metadata extraction rate, upload status.
     """
-    core.print_stats()
+    core.print_stats(no_metadata=no_metadata)
 
 @cli.command()
 @click.option('--samesize', is_flag=True, help='List groups of files with the same file size (more than one per group).')

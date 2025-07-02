@@ -10,10 +10,12 @@ import urllib.parse
 from PIL import Image
 import imagehash
 import cv2
+import concurrent.futures
+import signal
 
 from memory.db import MemoryDB, DB_NAME
 from memory.hasher import calculate_file_hash
-from memory.utils import generate_timestamp_suffix, get_media_type
+from memory.utils import generate_timestamp_suffix, get_media_type, is_valid_media_file
 from memory.media import get_media_metadata # Ensure this is imported
 
 MEMORY_FOLDER_NAME = ".memory"
@@ -62,101 +64,122 @@ def _scan_and_process_folder(
     db_path: Path,
     is_init: bool = False,
     logger=None,
-    recursive: bool = True
+    recursive: bool = True,
+    threads: int = 2
 ):
     """
     Scans a folder for media files, processes them (hash, copy, metadata),
     and adds to the database.
+    Uses a thread pool for parallel file processing, with real-time progress reporting.
+    Handles KeyboardInterrupt for safe shutdown.
     """
     import itertools
+    import threading
+    import queue
+    stop_event = threading.Event()
     db = MemoryDB(db_path)
     db.connect()
     try:
         managed_hashes = set(db.get_all_file_hashes())
         new_files_processed = 0
-
-        file_counter = 0
         memory_path = _get_memory_path()
         if recursive:
-            file_iter = source_folder.rglob('*')
+            file_iter = list(source_folder.rglob('*'))
         else:
-            file_iter = source_folder.iterdir()
-        for filepath in file_iter:
-            if not filepath.is_file():
-                continue
-            file_counter += 1
-            print(f"Processing file {file_counter} ...", end='\r', flush=True)
+            file_iter = list(source_folder.iterdir())
+        files_to_process = [f for f in file_iter if f.is_file() and MEMORY_FOLDER_NAME not in f.parts]
+        total_files = len(files_to_process)
+        processed_files = 0
 
-            # Avoid processing the .memory folder itself or its contents
-            if MEMORY_FOLDER_NAME in filepath.parts:
-                continue
-
+        def process_file(filepath):
+            nonlocal managed_hashes
+            if stop_event.is_set():
+                return None
             media_type = get_media_type(filepath)
-            if media_type:
-                file_hash = calculate_file_hash(filepath)
-
-                if file_hash in managed_hashes:
-                    msg = f"  Skipping '{filepath.name}': Duplicate file (hash: {file_hash})."
-                    if logger: logger.info(msg)
-                    continue
-
-                # Always copy into .memory folder
-                dest_folder = memory_path
-                current_filename = filepath.name
-                dest_path = dest_folder / current_filename
-
-                # Only apply filename suffix if the destination file already exists AND it's not the same content
-                if dest_path.exists():
-                    existing_file_hash = calculate_file_hash(dest_path)
-                    if existing_file_hash == file_hash:
-                        msg = f"  Skipping '{filepath.name}': Already present as '{dest_path.name}'."
-                        if logger: logger.info(msg)
-                        continue # File already exists in .memory folder with same content
-
-                    # Filename conflict with different content
-                    suffix = generate_timestamp_suffix()
-                    new_name = f"{filepath.stem}_{suffix}{filepath.suffix}"
-                    dest_path = dest_folder / new_name
-                    msg = f"  Filename conflict for '{filepath.name}'. Copying as '{new_name}'."
-                    if logger: logger.info(msg)
-
-                msg = f"  Copying '{filepath.name}' to '{dest_path.name}'..."
+            if not media_type:
+                if logger: logger.info(f"Skipping '{filepath.name}': Not a media file.")
+                return None
+            
+            # Validate file integrity before processing
+            if not is_valid_media_file(filepath):
+                msg = f"Skipping '{filepath.name}': Invalid or corrupted file (failed header check)."
                 if logger: logger.info(msg)
-                shutil.copy2(filepath, dest_path)
-
-                # Extract media metadata
-                extracted_metadata_json = get_media_metadata(filepath, media_type)
-                metadata_extracted = False
-                try:
-                    meta_obj = json.loads(extracted_metadata_json)
-                    if meta_obj:
-                        metadata_extracted = True
-                except Exception:
-                    metadata_extracted = False
-
-                perceptual_hash = _get_perceptual_hash(filepath, media_type)
-                metadata = {
-                    'file_hash': file_hash,
-                    'original_filename': filepath.name,
-                    'current_filename': dest_path.name,
-                    'original_path': _to_relative_path(filepath, memory_path),
-                    'current_path': _to_relative_path(dest_path, memory_path),
-                    'size': filepath.stat().st_size,
-                    'media_type': media_type,
-                    'date_added': datetime.now().isoformat(),
-                    'extracted_metadata': extracted_metadata_json,
-                    'metadata_extracted': metadata_extracted,
-                    'perceptual_hash': perceptual_hash
-                }
-
-                if db.add_file_metadata(metadata):
-                    msg = f"  Added '{dest_path.name}' to database."
+                return None
+            
+            file_hash = calculate_file_hash(filepath)
+            if file_hash in managed_hashes:
+                msg = f"Skipping '{filepath.name}': Duplicate file (hash: {file_hash})."
+                if logger: logger.info(msg)
+                return None
+            # Always copy into .memory folder
+            dest_folder = memory_path
+            current_filename = filepath.name
+            dest_path = dest_folder / current_filename
+            # Only apply filename suffix if the destination file already exists AND it's not the same content
+            if dest_path.exists():
+                existing_file_hash = calculate_file_hash(dest_path)
+                if existing_file_hash == file_hash:
+                    msg = f"Skipping '{filepath.name}': Already present as '{dest_path.name}'."
                     if logger: logger.info(msg)
-                    new_files_processed += 1
-                    managed_hashes.add(file_hash)
-                else:
-                    msg = f"  Failed to add '{dest_path.name}' to database (should not happen if hash check passed)."
-                    if logger: logger.info(msg)
+                    return None # File already exists in .memory folder with same content
+                # Filename conflict with different content
+                suffix = generate_timestamp_suffix()
+                new_name = f"{filepath.stem}_{suffix}{filepath.suffix}"
+                dest_path = dest_folder / new_name
+                msg = f"Filename conflict for '{filepath.name}'. Copying as '{new_name}'."
+                if logger: logger.info(msg)
+            msg = f"Copying '{filepath.name}' to '{dest_path.name}'..."
+            if logger: logger.info(msg)
+            shutil.copy2(filepath, dest_path)
+            # Extract media metadata - SKIPPED for now to focus on file management
+            # extracted_metadata_json = get_media_metadata(filepath, media_type, logger)
+            # metadata_extracted = False
+            # try:
+            #     meta_obj = json.loads(extracted_metadata_json)
+            #     if meta_obj:
+            #         metadata_extracted = True
+            # except Exception:
+            #     metadata_extracted = False
+            perceptual_hash = _get_perceptual_hash(filepath, media_type, logger)
+            metadata = {
+                'file_hash': file_hash,
+                'current_filename': dest_path.name,
+                'current_path': _to_relative_path(dest_path, memory_path),
+                'size': filepath.stat().st_size,
+                'media_type': media_type,
+                'date_added': datetime.now().isoformat(),
+                'extracted_metadata': None,  # Skip metadata for now
+                'metadata_extracted': False,  # Skip metadata for now
+                'perceptual_hash': perceptual_hash
+            }
+            return metadata
+
+        def signal_handler(sig, frame):
+            print("\nInterrupt received, finishing current file and exiting safely...")
+            stop_event.set()
+
+        old_handler = signal.signal(signal.SIGINT, signal_handler)
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=threads) as executor:
+                futures = [executor.submit(process_file, f) for f in files_to_process]
+                for idx, future in enumerate(concurrent.futures.as_completed(futures), 1):
+                    if stop_event.is_set():
+                        break
+                    try:
+                        metadata = future.result()
+                        processed_files += 1
+                        print(f"Processed {processed_files}/{total_files} files...", end='\r', flush=True)
+                        if metadata:
+                            if db.add_file_metadata(metadata):
+                                if logger: logger.info(f"Added '{metadata['current_filename']}' to database.")
+                                new_files_processed += 1
+                                managed_hashes.add(metadata['file_hash'])
+                            else:
+                                if logger: logger.info(f"Failed to add '{metadata['current_filename']}' to database (should not happen if hash check passed).")
+                    except Exception as e:
+                        if logger: logger.error(f"Exception during file processing: {e}")
+        finally:
+            signal.signal(signal.SIGINT, old_handler)
 
         print(' ' * 60, end='\r')  # Clear the progress line
         if new_files_processed == 0:
@@ -172,26 +195,36 @@ def _scan_and_process_folder(
     finally:
         db.close()
 
-def _get_perceptual_hash(filepath: Path, media_type: str) -> str | None:
+def _get_perceptual_hash(filepath: Path, media_type: str, logger=None) -> str | None:
     try:
         if media_type == 'photo':
             with Image.open(filepath) as img:
                 return str(imagehash.phash(img))
         elif media_type == 'video':
-            cap = cv2.VideoCapture(str(filepath))
-            frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-            if frame_count == 0:
-                return None
-            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_count // 2)
-            ret, frame = cap.read()
-            if ret:
-                img = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-                return str(imagehash.phash(img))
+            import os
+            import sys
+            # Redirect stderr to suppress FFmpeg messages
+            with open(os.devnull, 'w') as devnull:
+                old_stderr = sys.stderr
+                sys.stderr = devnull
+                try:
+                    cap = cv2.VideoCapture(str(filepath))
+                    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                    if frame_count == 0:
+                        return None
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, frame_count // 2)
+                    ret, frame = cap.read()
+                    if ret:
+                        img = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+                        return str(imagehash.phash(img))
+                finally:
+                    sys.stderr = old_stderr
     except Exception as e:
-        pass
+        if logger:
+            logger.warning(f"Could not compute perceptual hash for {filepath}: {e}")
     return None
 
-def import_folder(source_folder_str: str, recursive: bool = True):
+def import_folder(source_folder_str: str, recursive: bool = True, threads: int = 2):
     """Imports media files from a source folder into the memory home folder."""
     home_folder = _get_home_folder_path()
     memory_path = _get_memory_path()
@@ -217,9 +250,9 @@ def import_folder(source_folder_str: str, recursive: bool = True):
     logging.basicConfig(filename=log_file, filemode='w', level=logging.INFO, format='%(asctime)s %(message)s')
     logger = logging.getLogger('memory_import')
 
-    print(f"Importing from '{source_folder}' into '{home_folder}'... (recursive={recursive})")
-    logger.info(f"Importing from '{source_folder}' into '{home_folder}'... (recursive={recursive})")
-    _scan_and_process_folder(source_folder, db_path, logger=logger, recursive=recursive)
+    print(f"Importing from '{source_folder}' into '{home_folder}'... (recursive={recursive}, threads={threads})")
+    logger.info(f"Importing from '{source_folder}' into '{home_folder}'... (recursive={recursive}, threads={threads})")
+    _scan_and_process_folder(source_folder, db_path, logger=logger, recursive=recursive, threads=threads)
     print("Import complete.")
     logger.info("Import complete.")
 
@@ -265,6 +298,13 @@ def upload_to_cloud(cloud_target: str):
         print(f"Error: Invalid cloud target '{cloud_target}'. Choose from 's3', 'gcloud', 'azure'.")
         return
 
+    import threading
+    stop_event = threading.Event()
+    def signal_handler(sig, frame):
+        print("\nInterrupt received, finishing current file and exiting safely...")
+        stop_event.set()
+    old_handler = signal.signal(signal.SIGINT, signal_handler)
+
     db = MemoryDB(db_path)
     db.connect()
     try:
@@ -275,6 +315,8 @@ def upload_to_cloud(cloud_target: str):
 
         print(f"\n--- Uploading {len(unuploaded_files)} files to {cloud_target.upper()} ---")
         for i, file_meta in enumerate(unuploaded_files):
+            if stop_event.is_set():
+                break
             file_path = _from_relative_path(file_meta['current_path'], memory_path)
             if not file_path.exists():
                 print(f"Warning: File '{file_meta['current_filename']}' not found at '{file_path}'. Skipping.")
@@ -292,6 +334,7 @@ def upload_to_cloud(cloud_target: str):
                 time.sleep(0.5) # Simulate network latency
                 print(f"    (Simulated upload successful for {file_meta['current_filename']})")
                 db.mark_uploaded(file_meta['file_hash'], cloud_target)
+                db.conn.commit()  # Commit after each file
             except Exception as e:
                 print(f"    Error uploading '{file_meta['current_filename']}': {e}")
                 # Potentially log this and continue or retry
@@ -302,6 +345,7 @@ def upload_to_cloud(cloud_target: str):
     except Exception as e:
         print(f"An error occurred during upload: {e}")
     finally:
+        signal.signal(signal.SIGINT, old_handler)
         db.close()
 
 def delete_memory():
@@ -341,9 +385,10 @@ def delete_memory():
     except Exception as e:
         print(f"Error deleting '{memory_path}': {e}")
 
-def print_stats():
+def print_stats(no_metadata=False):
     """
     Print statistics about the managed files: total count, total size, metadata extraction rate, upload status.
+    When no_metadata=True, shows stats only for files without metadata extracted.
     """
     home_folder = _get_home_folder_path()
     memory_path = _get_memory_path()
@@ -357,14 +402,28 @@ def print_stats():
     db.connect()
     try:
         cursor = db.conn.cursor()
-        cursor.execute("SELECT COUNT(*), COALESCE(SUM(size), 0) FROM files")
-        total_files, total_size = cursor.fetchone()
+        
+        if no_metadata:
+            # Show stats only for files without metadata extracted
+            cursor.execute("SELECT COUNT(*), COALESCE(SUM(size), 0) FROM files WHERE metadata_extracted = 0")
+            total_files, total_size = cursor.fetchone()
+            
+            cursor.execute("SELECT COUNT(*) FROM files WHERE metadata_extracted = 0 AND (uploaded_s3 = 1 OR uploaded_gcloud = 1 OR uploaded_azure = 1)")
+            uploaded_count = cursor.fetchone()[0]
+            
+            print("\n--- Memory Stats (Files WITHOUT Metadata) ---")
+        else:
+            # Show stats for all files
+            cursor.execute("SELECT COUNT(*), COALESCE(SUM(size), 0) FROM files")
+            total_files, total_size = cursor.fetchone()
 
-        cursor.execute("SELECT COUNT(*) FROM files WHERE metadata_extracted = 1")
-        metadata_extracted_count = cursor.fetchone()[0]
+            cursor.execute("SELECT COUNT(*) FROM files WHERE metadata_extracted = 1")
+            metadata_extracted_count = cursor.fetchone()[0]
 
-        cursor.execute("SELECT COUNT(*) FROM files WHERE uploaded_s3 = 1 OR uploaded_gcloud = 1 OR uploaded_azure = 1")
-        uploaded_count = cursor.fetchone()[0]
+            cursor.execute("SELECT COUNT(*) FROM files WHERE uploaded_s3 = 1 OR uploaded_gcloud = 1 OR uploaded_azure = 1")
+            uploaded_count = cursor.fetchone()[0]
+            
+            print("\n--- Memory Stats ---")
 
         not_uploaded_count = total_files - uploaded_count
 
@@ -375,16 +434,19 @@ def print_stats():
                 size_bytes /= 1024
             return f"{size_bytes:.2f} PB"
 
-        print("\n--- Memory Stats ---")
         print(f"Total files: {total_files}")
         print(f"Total size: {total_size} bytes ({human_readable_size(total_size)})")
         if total_files > 0:
-            print(f"Files with metadata extracted: {metadata_extracted_count} ({metadata_extracted_count/total_files*100:.1f}%)")
+            if not no_metadata:
+                print(f"Files with metadata extracted: {metadata_extracted_count} ({metadata_extracted_count/total_files*100:.1f}%)")
             print(f"Files uploaded: {uploaded_count} ({uploaded_count/total_files*100:.1f}%)")
             print(f"Files not uploaded: {not_uploaded_count} ({not_uploaded_count/total_files*100:.1f}%)")
 
             # Per-format stats
-            cursor.execute("SELECT current_filename, size FROM files")
+            if no_metadata:
+                cursor.execute("SELECT current_filename, size FROM files WHERE metadata_extracted = 0")
+            else:
+                cursor.execute("SELECT current_filename, size FROM files")
             from collections import defaultdict
             format_counts = defaultdict(int)
             format_sizes = defaultdict(int)
@@ -401,7 +463,10 @@ def print_stats():
                 pct_size = size / total_size * 100 if total_size > 0 else 0
                 print(f"{ext or '(none)':<8} {count:8d} {pct_files:8.1f} {human_readable_size(size):>14} {pct_size:8.1f}")
         else:
-            print("No files managed yet.")
+            if no_metadata:
+                print("No files without metadata found.")
+            else:
+                print("No files managed yet.")
         print("-------------------\n")
     except Exception as e:
         print(f"Error gathering stats: {e}")
@@ -582,7 +647,7 @@ def populate_perceptual_hashes():
             if not file_path.exists():
                 logger.warning(f"File not found: {file_path}, skipping.")
                 continue
-            phash = _get_perceptual_hash(file_path, media_type)
+            phash = _get_perceptual_hash(file_path, media_type, logger)
             if phash:
                 cursor.execute("UPDATE files SET perceptual_hash = ? WHERE file_hash = ?", (phash, file_hash))
                 updated += 1
@@ -602,8 +667,16 @@ def populate_perceptual_hashes():
 def migrate_files_to_memory():
     """
     Move all files referenced by current_path in the database into the .memory folder (if not already there), update current_path to the new relative path, and warn about any missing or conflicting files.
+    Now interruption-safe and atomic per file.
     """
     import shutil
+    import threading
+    stop_event = threading.Event()
+    def signal_handler(sig, frame):
+        print("\nInterrupt received, finishing current file and exiting safely...")
+        stop_event.set()
+    old_handler = signal.signal(signal.SIGINT, signal_handler)
+
     home_folder = _get_home_folder_path()
     memory_path = _get_memory_path()
     db_path = _get_db_path()
@@ -620,6 +693,8 @@ def migrate_files_to_memory():
         rows = cursor.fetchall()
         moved = 0
         for file_hash, current_path in rows:
+            if stop_event.is_set():
+                break
             abs_path = _from_relative_path(current_path, memory_path)
             if abs_path.parent == memory_path:
                 continue  # Already in .memory
@@ -640,12 +715,13 @@ def migrate_files_to_memory():
             shutil.move(str(abs_path), str(dest_path))
             rel_path = _to_relative_path(dest_path, memory_path)
             cursor.execute("UPDATE files SET current_path = ? WHERE file_hash = ?", (rel_path, file_hash))
+            db.conn.commit()  # Commit after each file
             moved += 1
-        db.conn.commit()
         print(f"Moved {moved} files into .memory folder.")
     except Exception as e:
         print(f"Error during file migration: {e}")
     finally:
+        signal.signal(signal.SIGINT, old_handler)
         db.close()
 
 def migrate_files_table():
@@ -700,7 +776,15 @@ def migrate_files_table():
 def migrate_paths_to_relative():
     """
     Migrate all absolute paths in the database to relative paths (relative to the .memory folder) for current_path and original_path.
+    Now interruption-safe and atomic per file.
     """
+    import threading
+    stop_event = threading.Event()
+    def signal_handler(sig, frame):
+        print("\nInterrupt received, finishing current file and exiting safely...")
+        stop_event.set()
+    old_handler = signal.signal(signal.SIGINT, signal_handler)
+
     home_folder = _get_home_folder_path()
     memory_path = _get_memory_path()
     db_path = _get_db_path()
@@ -717,16 +801,19 @@ def migrate_paths_to_relative():
         rows = cursor.fetchall()
         updated = 0
         for file_hash, current_path, original_path in rows:
+            if stop_event.is_set():
+                break
             rel_current = _to_relative_path(_from_relative_path(current_path, memory_path), memory_path)
             rel_original = _to_relative_path(_from_relative_path(original_path, memory_path), memory_path)
             if rel_current != current_path or rel_original != original_path:
                 cursor.execute("UPDATE files SET current_path = ?, original_path = ? WHERE file_hash = ?", (rel_current, rel_original, file_hash))
+                db.conn.commit()  # Commit after each file
                 updated += 1
-        db.conn.commit()
         print(f"Migrated {updated} records to relative paths.")
     except Exception as e:
         print(f"Error during path migration: {e}")
     finally:
+        signal.signal(signal.SIGINT, old_handler)
         db.close()
 
 def scan_unmanaged_files(folder):
